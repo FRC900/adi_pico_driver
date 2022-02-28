@@ -12,7 +12,7 @@
 
   <param if="$(arg with_rviz)" name="robot_description" command="$(find xacro)/xacro --inorder '$(find adi_driver)/urdf/adis16470_breakout.urdf'" />
 
-  <node name="imu" pkg="adi_driver" type="adis16470_node" output="screen">
+  <node name="imu" pkg="adi_pico_driver" type="adis16470_node" output="screen">
     <param name="device" value="$(arg device)"/>
     <param name="frame_id" value="$(arg frame_id)"/>
     <param name="burst_mode" value="$(arg burst_read)"/>
@@ -28,7 +28,7 @@
   </node>
 
   <node if="$(arg with_rviz)"
-	name="rviz" pkg="rviz" type="rviz" args="-d $(find adi_driver)/launch/imu.rviz"/>
+	name="rviz" pkg="rviz" type="rviz" args="-d $(find adi_pico_driver)/launch/imu.rviz"/>
 
   <group ns="plot" if="$(arg with_plot)">
     <node name="gyro" pkg="rqt_plot" type="rqt_plot"
@@ -38,6 +38,6 @@
   </group>
 
   <!-- Connect sensors before tests -->
-  <test test-name="test_adis16470" pkg="adi_driver" type="test_adis16470.py"/>
+  <test test-name="test_adis16470" pkg="adi_pico_driver" type="test_adis16470.py"/>
   
 </launch>

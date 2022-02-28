@@ -1,7 +1,9 @@
 #include <iostream>
+#include <math.h>
 #include "ros/ros.h"
 #include "boost/asio/serial_port.hpp"
 #include "boost/asio/read.hpp"
+#include "sensor_msgs/Imu.h"
 
 boost::asio::io_service port_io;
 boost::asio::serial_port port(port_io, "/dev/ttyACM0");
@@ -32,7 +34,11 @@ std::string USB_ReadStream() {
     return std::string(rx.begin(), rx.end());
 }
 
-int main() {
+int main(int argc, char **argv) {
+    ros::init(argc, argv, "imu");
+    ros::NodeHandle nh("~");
+    ros::Publisher pub = nh.advertise<sensor_msgs::Imu>("data_raw", 100);
+
     boost::asio::serial_port_base::baud_rate baud_rate(115200);
     port.set_option(baud_rate);
 
@@ -55,8 +61,47 @@ int main() {
     USB_WriteLine("stream 1\r");
 
     while (true) {
-        std::string item  = USB_ReadStream();
-        std::cout << item << std::endl;
+        std::string s = USB_ReadStream();
+        std::cout << s << "\n\n";
+        if (s[s.size() - 1] != '\n') {
+            ROS_ERROR_STREAM("Misaligned stream item: " << s);
+        }
+
+        std::array<uint16_t, 16> vals = {0};
+        int j = 0;
+        for (int i = 0; i < 16; i++) {
+            vals[i] = std::stoul(s.substr(j, 4), nullptr, 16);
+            j += 5;
+        }
+
+        sensor_msgs::Imu msg;
+
+        // msg.header.stamp.sec = (vals[0] << 16) | vals[1];
+        // Microseconds to nanoseconds
+        // msg.header.stamp.nsec = ((vals[1] << 16) | vals[2]) * 1000;
+        msg.header.stamp = ros::Time::now();
+
+        // DATA_CNTR
+        // msg.header.seq = vals[14];
+        msg.header.frame_id = "imu";
+
+        // Linear acceleration: {X,Y,Z}_GYRO_OUT
+        msg.linear_acceleration.x = static_cast<int16_t>(vals[7]) * M_PI / 180 * 0.1;
+        msg.linear_acceleration.y = static_cast<int16_t>(vals[8]) * M_PI / 180 * 0.1;
+        msg.linear_acceleration.z = static_cast<int16_t>(vals[9]) * M_PI / 180 * 0.1;
+
+        // Angular velocity: {X,Y,Z}_ACCL_OUT
+        msg.angular_velocity.x = static_cast<int16_t>(vals[10]) * 1.25 * 9.80665 / 1000.;
+        msg.angular_velocity.y = static_cast<int16_t>(vals[11]) * 1.25 * 9.80665 / 1000.;
+        msg.angular_velocity.z = static_cast<int16_t>(vals[12]) * 1.25 * 9.80665 / 1000.;
+
+        // Orientation (not provided)
+        msg.orientation.x = 0;
+        msg.orientation.y = 0;
+        msg.orientation.z = 0;
+        msg.orientation.w = 1;
+
+        pub.publish(msg);
     }
 
     port.close();

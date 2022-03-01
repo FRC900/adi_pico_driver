@@ -36,8 +36,15 @@ std::string USB_ReadStream() {
 
 int16_t unsigned_to_signed(const uint16_t *num) {
     // probably a very bad idea, but it works(TM)
-    int16_t num = *((int16_t*)num);
-    return num;
+    int16_t converted = *((int16_t*)num);
+    return converted;
+}
+
+std::string hex_to_string(uint8_t byte) {
+  char buff[3];
+  snprintf(buff, sizeof(buff), "%02X", byte);
+  std::string str = buff;
+  return str;
 }
 
 int main(int argc, char **argv) {
@@ -47,6 +54,9 @@ int main(int argc, char **argv) {
 
     boost::asio::serial_port_base::baud_rate baud_rate(115200);
     port.set_option(baud_rate);
+
+    USB_WriteLine("cmd 4\r");
+    ros::Duration(5.0).sleep();
 
     USB_WriteLine("echo 0\r");
     std::string res = USB_ReadLine();
@@ -64,6 +74,7 @@ int main(int argc, char **argv) {
     USB_WriteLine("write 12 00\r");
     USB_WriteLine("write 13 68\r");
     USB_WriteLine("write 00 FF\r");
+
     USB_WriteLine("stream 1\r");
 
     while (true) {
@@ -92,14 +103,14 @@ int main(int argc, char **argv) {
         msg.header.frame_id = "imu";
 
         // Angular velocity: {X,Y,Z}_GYRO_OUT
-        msg.angular_velocity.x = unsigned_to_signed(vals[7]) * M_PI / 180 * 0.1;
-        msg.angular_velocity.y = unsigned_to_signed(vals[8]) * M_PI / 180 * 0.1;
-        msg.angular_velocity.z = unsigned_to_signed(vals[9]) * M_PI / 180 * 0.1;
+        msg.angular_velocity.x = unsigned_to_signed(&vals[7]) * M_PI / 180 * 0.1;
+        msg.angular_velocity.y = unsigned_to_signed(&vals[8]) * M_PI / 180 * 0.1;
+        msg.angular_velocity.z = unsigned_to_signed(&vals[9]) * M_PI / 180 * 0.1;
 
         // Linear acceleration: {X,Y,Z}_ACCL_OUT
-        msg.linear_acceleration.x = unsigned_to_signed(vals[10]) * 1.25 * 9.80665 / 1000.;
-        msg.linear_acceleration.y = unsigned_to_signed(vals[11]) * 1.25 * 9.80665 / 1000.;
-        msg.linear_acceleration.z = unsigned_to_signed(vals[12]) * 1.25 * 9.80665 / 1000.;
+        msg.linear_acceleration.x = unsigned_to_signed(&vals[10]) * 1.25 * 9.80665 / 1000.;
+        msg.linear_acceleration.y = unsigned_to_signed(&vals[11]) * 1.25 * 9.80665 / 1000.;
+        msg.linear_acceleration.z = unsigned_to_signed(&vals[12]) * 1.25 * 9.80665 / 1000.;
 
         // Orientation (not provided)
         msg.orientation.x = 0;

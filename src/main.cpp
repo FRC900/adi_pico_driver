@@ -34,6 +34,12 @@ std::string USB_ReadStream() {
     return std::string(rx.begin(), rx.end());
 }
 
+int16_t unsigned_to_signed(const uint16_t *num) {
+    // probably a very bad idea, but it works(TM)
+    int16_t num = *((int16_t*)num);
+    return num;
+}
+
 int main(int argc, char **argv) {
     ros::init(argc, argv, "imu");
     ros::NodeHandle nh("~");
@@ -85,15 +91,15 @@ int main(int argc, char **argv) {
         // msg.header.seq = vals[14];
         msg.header.frame_id = "imu";
 
-        // Linear acceleration: {X,Y,Z}_GYRO_OUT
-        msg.linear_acceleration.x = static_cast<int16_t>(vals[7]) * M_PI / 180 * 0.1;
-        msg.linear_acceleration.y = static_cast<int16_t>(vals[8]) * M_PI / 180 * 0.1;
-        msg.linear_acceleration.z = static_cast<int16_t>(vals[9]) * M_PI / 180 * 0.1;
+        // Angular velocity: {X,Y,Z}_GYRO_OUT
+        msg.angular_velocity.x = unsigned_to_signed(vals[7]) * M_PI / 180 * 0.1;
+        msg.angular_velocity.y = unsigned_to_signed(vals[8]) * M_PI / 180 * 0.1;
+        msg.angular_velocity.z = unsigned_to_signed(vals[9]) * M_PI / 180 * 0.1;
 
-        // Angular velocity: {X,Y,Z}_ACCL_OUT
-        msg.angular_velocity.x = static_cast<int16_t>(vals[10]) * 1.25 * 9.80665 / 1000.;
-        msg.angular_velocity.y = static_cast<int16_t>(vals[11]) * 1.25 * 9.80665 / 1000.;
-        msg.angular_velocity.z = static_cast<int16_t>(vals[12]) * 1.25 * 9.80665 / 1000.;
+        // Linear acceleration: {X,Y,Z}_ACCL_OUT
+        msg.linear_acceleration.x = unsigned_to_signed(vals[10]) * 1.25 * 9.80665 / 1000.;
+        msg.linear_acceleration.y = unsigned_to_signed(vals[11]) * 1.25 * 9.80665 / 1000.;
+        msg.linear_acceleration.z = unsigned_to_signed(vals[12]) * 1.25 * 9.80665 / 1000.;
 
         // Orientation (not provided)
         msg.orientation.x = 0;

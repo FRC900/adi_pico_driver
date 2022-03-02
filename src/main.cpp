@@ -3,14 +3,14 @@
 #include "ros/ros.h"
 #include "boost/asio/serial_port.hpp"
 #include "boost/asio/read.hpp"
-#include "boost/asio/read_until.hpp"
+#include "boost/asio/write.hpp"
 #include "sensor_msgs/Imu.h"
 
 boost::asio::io_service port_io;
 boost::asio::serial_port port(port_io, "/dev/ttyACM0");
 
 void USB_WriteLine(std::string tx) {
-    port.write_some(boost::asio::buffer(tx, tx.size()));
+    boost::asio::write(port, boost::asio::buffer(tx, tx.size()));
 }
 
 std::string USB_ReadLine() {
@@ -35,53 +35,8 @@ std::string USB_ReadStream() {
     return std::string(rx.begin(), rx.end());
 }
 
-void USB_WaitForNewline() {
-  boost::asio::basic_streambuf buf;
-  boost::asio::read_until(port, buf, '\n');
-  return;
-}
-
-int16_t unsigned_to_signed(const uint16_t *num) {
-    // probably a very bad idea, but it works(TM)
-    int16_t converted = *((int16_t*)num);
-    return converted;
-}
-
-std::string hex_to_string(uint8_t byte) {
-  char buff[3];
-  snprintf(buff, sizeof(buff), "%02X", byte);
-  std::string str = buff;
-  return str;
-}
-
-// This is from Stack Overflow: https://stackoverflow.com/questions/22581315/how-to-discard-data-as-it-is-sent-with-boostasio/22598329#22598329
-/// @brief Different ways a serial port may be flushed.
-enum flush_type
-{
-  flush_receive = TCIFLUSH,
-  flush_send = TCOFLUSH,
-  flush_both = TCIOFLUSH
-};
-
-/// @brief Flush a serial port's buffers.
-///
-/// @param serial_port Port to flush.
-/// @param what Determines the buffers to flush.
-/// @param error Set to indicate what error occurred, if any.
-void flush_serial_port(
-  boost::asio::serial_port& serial_port,
-  flush_type what,
-  boost::system::error_code& error)
-{
-  if (0 == ::tcflush(serial_port.lowest_layer().native_handle(), what))
-  {
-    error = boost::system::error_code();
-  }
-  else
-  {
-    error = boost::system::error_code(errno,
-        boost::asio::error::get_system_category());
-  }
+inline int16_t uint16_to_int16(uint16_t num) {
+    return *((int16_t*)&num);
 }
 
 int main(int argc, char **argv) {
@@ -92,16 +47,20 @@ int main(int argc, char **argv) {
     boost::asio::serial_port_base::baud_rate baud_rate(115200);
     port.set_option(baud_rate);
 
+    // Reboot Pico
     USB_WriteLine("cmd 4\r");
+    std::string cmd_res = USB_ReadLine();
+    if (cmd_res != "cmd 4") {
+        ROS_ERROR_STREAM("adi_pico_driver : Unexpected response to command: " << cmd_res);
+    }
+
+    // Wait for Pico to start again
     ros::Duration(5.0).sleep();
 
-    boost::system::error_code error;
-    flush_serial_port(port, flush_receive, error);
-
     USB_WriteLine("echo 0\r");
-    std::string res = USB_ReadLine();
-    if (res != "echo 0") {
-        ROS_ERROR_STREAM("adi_pico_driver : Unexpected response to command: " << res);
+    std::string echo_res = USB_ReadLine();
+    if (echo_res != "echo 0") {
+        ROS_ERROR_STREAM("adi_pico_driver : Unexpected response to command: " << echo_res);
     }
 
     USB_WriteLine("write 00 00\r");
@@ -121,19 +80,14 @@ int main(int argc, char **argv) {
 
     while (true) {
         std::string s = USB_ReadStream();
-        std::cout << s << "\n\n";
-        if (s[s.size() - 1] != '\n') {
-            ROS_ERROR_STREAM("adi_pico_driver : Misaligned stream item: " << s << ". Trying to realign.");
-            USB_WaitForNewline();
-            continue;
-        }
-
         std::array<uint16_t, 16> vals = {0};
         int j = 0;
         for (int i = 0; i < 16; i++) {
             vals[i] = std::stoul(s.substr(j, 4), nullptr, 16);
             j += 5;
         }
+
+        // TODO: Validate checksums
 
         sensor_msgs::Imu msg;
 
@@ -147,14 +101,14 @@ int main(int argc, char **argv) {
         msg.header.frame_id = "imu";
 
         // Angular velocity: {X,Y,Z}_GYRO_OUT
-        msg.angular_velocity.x = unsigned_to_signed(&vals[7]) * M_PI / 180 * 0.1;
-        msg.angular_velocity.y = unsigned_to_signed(&vals[8]) * M_PI / 180 * 0.1;
-        msg.angular_velocity.z = unsigned_to_signed(&vals[9]) * M_PI / 180 * 0.1;
+        msg.angular_velocity.x = uint16_to_int16(vals[7]) * M_PI / 180 * 0.1;
+        msg.angular_velocity.y = uint16_to_int16(vals[8]) * M_PI / 180 * 0.1;
+        msg.angular_velocity.z = uint16_to_int16(vals[9]) * M_PI / 180 * 0.1;
 
         // Linear acceleration: {X,Y,Z}_ACCL_OUT
-        msg.linear_acceleration.x = unsigned_to_signed(&vals[10]) * 1.25 * 9.80665 / 1000.;
-        msg.linear_acceleration.y = unsigned_to_signed(&vals[11]) * 1.25 * 9.80665 / 1000.;
-        msg.linear_acceleration.z = unsigned_to_signed(&vals[12]) * 1.25 * 9.80665 / 1000.;
+        msg.linear_acceleration.x = uint16_to_int16(vals[10]) * 1.25 * 9.80665 / 1000.;
+        msg.linear_acceleration.y = uint16_to_int16(vals[11]) * 1.25 * 9.80665 / 1000.;
+        msg.linear_acceleration.z = uint16_to_int16(vals[12]) * 1.25 * 9.80665 / 1000.;
 
         // Orientation (not provided)
         msg.orientation.x = 0;

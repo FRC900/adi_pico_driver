@@ -3,6 +3,7 @@
 #include "ros/ros.h"
 #include "boost/asio/serial_port.hpp"
 #include "boost/asio/read.hpp"
+#include "boost/asio/read_until.hpp"
 #include "sensor_msgs/Imu.h"
 
 boost::asio::io_service port_io;
@@ -34,6 +35,12 @@ std::string USB_ReadStream() {
     return std::string(rx.begin(), rx.end());
 }
 
+void USB_WaitForNewline() {
+  boost::asio::basic_streambuf buf;
+  boost::asio::read_until(port, buf, '\n');
+  return;
+}
+
 int16_t unsigned_to_signed(const uint16_t *num) {
     // probably a very bad idea, but it works(TM)
     int16_t converted = *((int16_t*)num);
@@ -47,6 +54,36 @@ std::string hex_to_string(uint8_t byte) {
   return str;
 }
 
+// This is from Stack Overflow: https://stackoverflow.com/questions/22581315/how-to-discard-data-as-it-is-sent-with-boostasio/22598329#22598329
+/// @brief Different ways a serial port may be flushed.
+enum flush_type
+{
+  flush_receive = TCIFLUSH,
+  flush_send = TCOFLUSH,
+  flush_both = TCIOFLUSH
+};
+
+/// @brief Flush a serial port's buffers.
+///
+/// @param serial_port Port to flush.
+/// @param what Determines the buffers to flush.
+/// @param error Set to indicate what error occurred, if any.
+void flush_serial_port(
+  boost::asio::serial_port& serial_port,
+  flush_type what,
+  boost::system::error_code& error)
+{
+  if (0 == ::tcflush(serial_port.lowest_layer().native_handle(), what))
+  {
+    error = boost::system::error_code();
+  }
+  else
+  {
+    error = boost::system::error_code(errno,
+        boost::asio::error::get_system_category());
+  }
+}
+
 int main(int argc, char **argv) {
     ros::init(argc, argv, "imu");
     ros::NodeHandle nh("~");
@@ -58,15 +95,20 @@ int main(int argc, char **argv) {
     USB_WriteLine("cmd 4\r");
     ros::Duration(5.0).sleep();
 
+    boost::system::error_code error;
+    flush_serial_port(port, flush_receive, error);
+
     USB_WriteLine("echo 0\r");
     std::string res = USB_ReadLine();
     if (res != "echo 0") {
-        ROS_ERROR_STREAM("Unexpected response to command: " << res);
+        ROS_ERROR_STREAM("adi_pico_driver : Unexpected response to command: " << res);
     }
 
     USB_WriteLine("write 00 00\r");
     USB_WriteLine("read 72\r");
     ROS_INFO_STREAM("IMU PROD_ID: " << USB_ReadLine());
+    USB_WriteLine("read 74\r");
+    ROS_INFO_STREAM("IMU SERIAL_NUM: " << USB_ReadLine());
 
     USB_WriteLine("write 00 FD\r");
     USB_WriteLine("write 02 02\r");
@@ -81,7 +123,9 @@ int main(int argc, char **argv) {
         std::string s = USB_ReadStream();
         std::cout << s << "\n\n";
         if (s[s.size() - 1] != '\n') {
-            ROS_ERROR_STREAM("Misaligned stream item: " << s);
+            ROS_ERROR_STREAM("adi_pico_driver : Misaligned stream item: " << s << ". Trying to realign.");
+            USB_WaitForNewline();
+            continue;
         }
 
         std::array<uint16_t, 16> vals = {0};

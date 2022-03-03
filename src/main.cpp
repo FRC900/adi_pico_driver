@@ -69,6 +69,7 @@ std::string USB_ReadLine() {
     }
 }
 
+// from https://stackoverflow.com/questions/28253352/how-to-determine-if-there-are-bytes-available-to-be-read-from-boostasioserial
 /// @brief Returns the number of bytes available for reading from a serial
 ///        port without blocking.
 std::size_t get_bytes_available(

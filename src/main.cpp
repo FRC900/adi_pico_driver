@@ -10,7 +10,12 @@
 #include <thread>
 #include <array>
 
-#define MEMORY_WARNING_BYTES 100000
+#define MEMORY_WARNING_BYTES 256000
+#define CLEAR_QUEUE_BYTES 6000000
+// if queue memory > MEMORY_WARNING_BYTES, warnings are printed. if queue memory > CLEAR_QUEUE_BYTES, the queue is cleared until it is smaller than MEMORY_WARNING_BYTES.
+
+#define DATA_BLOCK_SIZE 180
+// This is in multiples of 81
 
 template <typename T> class ThreadSafeQueue {
 public:
@@ -23,13 +28,24 @@ public:
     T item;
     while (queue_.size() == 0) {
       // block, otherwise this will deadlock (I think)
-      ROS_INFO_STREAM_THROTTLE(0.5, "size is 0");
+      ROS_INFO_STREAM_THROTTLE(0.5, "adi_pico_driver : size is 0");
+      sleep(0);
     }
     item = queue_.front();
-    mtx_.lock();
+    while (!mtx_.try_lock()) {
+      sleep(0);
+    }
     queue_.pop();
     mtx_.unlock();
     return item;
+  }
+  void force_clear_queue() {
+    // use in case of (memory) emergency
+    mtx_.lock();
+    while (queue_.size() * 81 * DATA_BLOCK_SIZE > MEMORY_WARNING_BYTES) {
+      queue_.pop();
+    }
+    mtx_.unlock();
   }
   size_t size() {
     return queue_.size();
@@ -38,9 +54,6 @@ private:
   std::mutex mtx_;
   std::queue<T> queue_;
 };
-
-#define DATA_BLOCK_SIZE 50
-// This is multiples of 81, 81*50 = 4050
 
 using DataBlock = std::array<char, 81*DATA_BLOCK_SIZE>;
 
@@ -118,19 +131,6 @@ std::size_t get_bytes_available(boost::asio::serial_port& serial_port)
   return bytes_available;
 }
 
-DataBlock USB_ReadStream() {
-    if (get_bytes_available(port) == 0) {
-      ROS_INFO_STREAM("reading data faster than pico!");
-    } else if (get_bytes_available(port) > 4094) {
-      ROS_WARN_STREAM("adi_pico_driver : serial port buffer overflow! likely losing data!");
-    } else if (get_bytes_available(port) > 2000) {
-      ROS_INFO_STREAM("big nope: " << get_bytes_available(port));
-    }
-    DataBlock rx;
-    boost::asio::read(port, boost::asio::buffer(rx));
-    return rx;
-}
-
 inline int16_t uint16_to_int16(uint16_t num) {
     return *((int16_t*)&num);
 }
@@ -139,7 +139,11 @@ void process_data_loop(ros::NodeHandle &nh) {
   ros::Publisher pub = nh.advertise<sensor_msgs::Imu>("data_raw", 100);
   while (ros::ok()) {
     if (data.size() * 81 * DATA_BLOCK_SIZE > MEMORY_WARNING_BYTES) {
-      ROS_WARN_STREAM_THROTTLE(0.5, "adi_pico_driver : large memory usage in queue!");
+      ROS_WARN_STREAM_THROTTLE(0.5, "adi_pico_driver : large memory usage in queue (" << data.size() * 81 * DATA_BLOCK_SIZE << " bytes)! (pico writing speed > processing speed)");
+    }
+    if (data.size() * 81 * DATA_BLOCK_SIZE > CLEAR_QUEUE_BYTES) {
+      ROS_ERROR_STREAM_THROTTLE(0.5, "adi_pico_driver : !!! CLEARING QUEUE DUE TO MEMORY USAGE. THIS WILL GET RID OF DATA.");
+      data.force_clear_queue();
     }
     ROS_INFO_STREAM_THROTTLE(1, "adi_pico_driver : processing data");
     auto item = data.pop();
@@ -183,12 +187,18 @@ void process_data_loop(ros::NodeHandle &nh) {
 
       pub.publish(msg);
     }
+    sleep(0);
   }
 }
 
 void read_data_loop() {
   while (ros::ok()) {
-    data.push(USB_ReadStream());
+    if (get_bytes_available(port) > 4094) {
+        ROS_WARN_STREAM("adi_pico_driver : serial port buffer overflow! likely losing data!");
+    }
+    DataBlock rx;
+    boost::asio::read(port, boost::asio::buffer(rx));
+    data.push(rx);
   }
 }
 
@@ -222,6 +232,29 @@ void flush_serial_port(
   }
 }
 
+void init_pico() {
+  ROS_INFO_STREAM("adi_pico_driver : initializing pico");
+  // Reboot Pico
+  USB_WriteLine("cmd 4\r");
+
+  // Wait for Pico to restart
+  ros::Duration(2.5).sleep();
+
+  boost::system::error_code error;
+  flush_serial_port(port, flush_receive, error);
+
+  // Wait a bit more and flush the buffer again to be safe
+  ros::Duration(2.5).sleep();
+  flush_serial_port(port, flush_receive, error);
+
+  USB_WriteLine("echo 0\r");
+  std::string echo_res = USB_ReadLine();
+  if (echo_res != "echo 0") {
+      ROS_ERROR_STREAM("adi_pico_driver : Unexpected response to command \"echo 0\": " << echo_res);
+      ROS_INFO_STREAM("adi_pico_driver : trying to reinitialize");
+      init_pico();
+  }
+}
 
 int main(int argc, char **argv) {
     ros::init(argc, argv, "imu");
@@ -230,33 +263,13 @@ int main(int argc, char **argv) {
     boost::asio::serial_port_base::baud_rate baud_rate(115200);
     port.set_option(baud_rate);
 
-    // Reboot Pico
-    USB_WriteLine("cmd 4\r");
-
-    boost::system::error_code error;
-    flush_serial_port(port, flush_receive, error);
-
-    ros::Duration(2.5).sleep();
-
-    std::string cmd_res = USB_ReadLine();
-    if (cmd_res != "cmd 4") {
-        ROS_ERROR_STREAM("adi_pico_driver : Unexpected response to command: " << cmd_res);
-    }
-
-    // Wait for Pico to start again
-    ros::Duration(2.5).sleep();
-
-    USB_WriteLine("echo 0\r");
-    std::string echo_res = USB_ReadLine();
-    if (echo_res != "echo 0") {
-        ROS_ERROR_STREAM("adi_pico_driver : Unexpected response to command: " << echo_res);
-    }
+    init_pico();
 
     USB_WriteLine("write 00 00\r");
     USB_WriteLine("read 72\r");
-    ROS_INFO_STREAM("IMU PROD_ID: " << USB_ReadLine());
+    ROS_INFO_STREAM("adi_pico_driver : IMU PROD_ID: " << USB_ReadLine());
     USB_WriteLine("read 74\r");
-    ROS_INFO_STREAM("IMU SERIAL_NUM: " << USB_ReadLine());
+    ROS_INFO_STREAM("adi_pico_driver : IMU SERIAL_NUM: " << USB_ReadLine());
 
     USB_WriteLine("write 00 FD\r");
     USB_WriteLine("write 02 02\r");
@@ -269,6 +282,13 @@ int main(int argc, char **argv) {
 
     std::thread t(process_data_loop, std::ref(nh));
     std::thread t2(read_data_loop); // more important to run fast
+    sched_param sch_params;
+    sch_params.sched_priority = sched_get_priority_max(SCHED_RR);
+    pthread_setschedparam(t2.native_handle(), SCHED_RR, &sch_params);
+
+    sched_param sch_params_processing;
+    sch_params_processing.sched_priority = sched_get_priority_max(SCHED_RR) * 0.6;
+    pthread_setschedparam(t.native_handle(), SCHED_RR, &sch_params_processing);
 
     t2.join();
 

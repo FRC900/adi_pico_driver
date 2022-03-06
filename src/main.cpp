@@ -1,35 +1,23 @@
 // NOTE this requires access to /dev/ttyACM0, which may require adding the user to a group with permissions (e.g. dialout)
 
-#include <sys/types.h>
-#include <sys/stat.h>
+#include "ros/ros.h"
+#include "sensor_msgs/Imu.h"
 #include <fcntl.h>
-#include <unistd.h>
-#include <termios.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <time.h>
-#include <sys/time.h>
 #include <string.h>
-#include <iostream>
-#include <math.h>
-#include "ros/ros.h"
 #include <sys/ioctl.h>
-#include "sensor_msgs/Imu.h"
+#include <sys/stat.h>
+#include <sys/time.h>
+#include <sys/types.h>
+#include <termios.h>
+#include <time.h>
+#include <unistd.h>
 
 #define BAUDRATE B115200
 #define DEVICE "/dev/ttyACM0"
 #define _POSIX_SOURCE 1 /* POSIX compliant source */
 #define LINE_SIZE 81
-
-/* Commands to initialize pico:
-write 00 FD
-write 02 02
-write 00 FE
-write 12 00
-write 13 68
-write 00 FF
-stream 1
-*/
 
 const char inc[] = "inc\r";
 const char *init[] = {
@@ -44,14 +32,10 @@ const char *init[] = {
     "stream 1\r"
 };
 
-
+ros::Publisher pub;
 unsigned long long nsecs_offset;
 
-inline int16_t uint16_to_int16(uint16_t num) {
-    return *((int16_t*)&num);
-}
-
-void process_data(ros::Publisher &pub, char *buf) {
+void process_data(char *buf) {
     std::array<uint16_t, 16> vals = {0};
     char *next_num = buf;
     for (int i = 0; i < 16; i++) {
@@ -72,14 +56,14 @@ void process_data(ros::Publisher &pub, char *buf) {
     msg.header.frame_id = "imu";
 
     // Angular velocity: {X,Y,Z}_GYRO_OUT
-    msg.angular_velocity.x = uint16_to_int16(vals[7]) * M_PI / 180 * 0.1;
-    msg.angular_velocity.y = uint16_to_int16(vals[8]) * M_PI / 180 * 0.1;
-    msg.angular_velocity.z = uint16_to_int16(vals[9]) * M_PI / 180 * 0.1;
+    msg.angular_velocity.x = static_cast<int16_t>(vals[7]) * M_PI / 180 * 0.1;
+    msg.angular_velocity.y = static_cast<int16_t>(vals[8]) * M_PI / 180 * 0.1;
+    msg.angular_velocity.z = static_cast<int16_t>(vals[9]) * M_PI / 180 * 0.1;
 
     // Linear acceleration: {X,Y,Z}_ACCL_OUT
-    msg.linear_acceleration.x = uint16_to_int16(vals[10]) * 1.25 * 9.80665 / 1000.;
-    msg.linear_acceleration.y = uint16_to_int16(vals[11]) * 1.25 * 9.80665 / 1000.;
-    msg.linear_acceleration.z = uint16_to_int16(vals[12]) * 1.25 * 9.80665 / 1000.;
+    msg.linear_acceleration.x = static_cast<int16_t>(vals[10]) * 1.25 * 9.80665 / 1000.;
+    msg.linear_acceleration.y = static_cast<int16_t>(vals[11]) * 1.25 * 9.80665 / 1000.;
+    msg.linear_acceleration.z = static_cast<int16_t>(vals[12]) * 1.25 * 9.80665 / 1000.;
 
     // Orientation (not provided)
     msg.orientation.x = 0;
@@ -92,36 +76,38 @@ void process_data(ros::Publisher &pub, char *buf) {
 
 int main(int argc, char **argv) {
     int fd;
-    struct termios newtio;
+    struct termios tty;
 
     fd = open(DEVICE, O_RDWR | O_NOCTTY | O_SYNC);
     if (fd < 0) {
-        perror(DEVICE);
-        exit(-1);
+        ROS_ERROR("%s: %s", DEVICE, strerror(errno));
+        return 1;
     }
 
-    cfsetospeed (&newtio, BAUDRATE);
-    cfsetispeed (&newtio, BAUDRATE);
-    newtio.c_cflag = BAUDRATE | CS8 | CLOCAL | CREAD;
-    newtio.c_iflag = IGNPAR;
-    newtio.c_oflag = 0;
+    cfsetospeed (&tty, BAUDRATE);
+    cfsetispeed (&tty, BAUDRATE);
+    tty.c_cflag = BAUDRATE | CS8 | CLOCAL | CREAD;
+    tty.c_iflag = IGNPAR;
+    tty.c_oflag = 0;
 
     /* set input mode (non-canonical, no echo,...) */
-    newtio.c_lflag = ICANON;
+    tty.c_lflag = ICANON;
 
     /* inter-character timer unused */
-    newtio.c_cc[VTIME] = 0;
+    tty.c_cc[VTIME] = 0;
 
     /* read(2) blocks until MIN bytes are available,
      * and returns up to the number of bytes requested. */
-    newtio.c_cc[VMIN] = LINE_SIZE;
+    tty.c_cc[VMIN] = LINE_SIZE;
 
     tcflush(fd, TCIOFLUSH);
-    tcsetattr(fd, TCSANOW, &newtio);
+    tcsetattr(fd, TCSANOW, &tty);
 
     /* Write all init commands */
     for (const char *s : init) {
-        write(fd, s, strlen(s));
+        if(write(fd, s, strlen(s)) == -1) {
+            ROS_ERROR("failed to write \"%s\" during initialization: %s", s, strerror(errno));
+        }
     }
 
     /* Write all output, clear input */
@@ -130,7 +116,7 @@ int main(int argc, char **argv) {
 
     ros::init(argc, argv, "imu");
     ros::NodeHandle nh("~");
-    ros::Publisher pub = nh.advertise<sensor_msgs::Imu>("data_raw", 100);
+    pub = nh.advertise<sensor_msgs::Imu>("data_raw", 100);
 
     char buf[LINE_SIZE + 1];
     buf[LINE_SIZE] = '\0';
@@ -145,7 +131,7 @@ int main(int argc, char **argv) {
         }
 
         if (buf[LINE_SIZE - 1] != '\n') {
-            printf("ERROR: line not ending with \\n, skipping\n");
+            ROS_WARN("Line not ending with \\n, skipping");
 
             /* Discard characters until \n */
             char c;
@@ -161,16 +147,22 @@ int main(int argc, char **argv) {
 
         /* The recieve buffer holds at most 4095 bytes */
         if (length >= 4000) {
-            printf("ERROR: serial port receive buffer overflow\n");
+            ROS_WARN("Serial port receive buffer holding %d out of 4095 bytes", length);
+        }
+        if (length == 4095) {
+            ROS_ERROR("Serial port recieve buffer overflow");
         }
 
-        process_data(pub, buf);
+        process_data(buf);
 
         time_t s = time(NULL);
         if (s > seconds) {
             seconds = s;
 
-            write(fd, inc, sizeof(inc) - 1);
+            if(write(fd, inc, sizeof(inc) - 1) == -1) {
+                ROS_ERROR("failed to increment PPS: %s", strerror(errno));
+            }
+
             tcdrain(fd);
         }
     }

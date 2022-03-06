@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <queue>
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/types.h>
@@ -21,6 +22,7 @@
 
 const char inc[] = "inc\r";
 const char *init[] = {
+    "\r",
     "cmd 4\r",
     "echo 0\r",
     "write 00 FD\r",
@@ -33,7 +35,11 @@ const char *init[] = {
 };
 
 ros::Publisher pub;
-unsigned long long nsecs_offset;
+
+/* Time of incrementing PPS to (i - seconds_index) */
+std::queue<ros::Time> inc_timestamps;
+/* The earliest second PPS was incremented to */
+int seconds_index = 0;
 
 void process_data(char *buf) {
     std::array<uint16_t, 16> vals = {0};
@@ -44,12 +50,20 @@ void process_data(char *buf) {
 
     // TODO: Validate checksums
 
+    int seconds = vals[0] | (vals[1] << 16);
+    int us = vals[2] | (vals[3] << 16);
+
+    /* Remove timestamp for previous second once we recieve lines from the next second */
+    if (seconds > seconds_index) {
+        inc_timestamps.pop();
+        seconds_index++;
+    }
+    ros::Time timestamp = inc_timestamps.front() + ros::Duration(0, us * 1000);
+
     sensor_msgs::Imu msg;
 
-    msg.header.stamp.sec = (vals[0] << 16) | vals[1] + nsecs_offset / 1000000000ULL;
     // Microseconds to nanoseconds
-    msg.header.stamp.nsec = ((vals[1] << 16) | vals[2]) * 1000 + nsecs_offset % 1000000000ULL;
-    msg.header.stamp = ros::Time::now();
+    msg.header.stamp = timestamp;
 
     // DATA_CNTR
     // msg.header.seq = vals[14];
@@ -121,7 +135,7 @@ int main(int argc, char **argv) {
     char buf[LINE_SIZE + 1];
     buf[LINE_SIZE] = '\0';
     time_t seconds = 0;
-    nsecs_offset = ros::Time::now().toNSec(); // May need to reset offset each `inc`, but also need to store the previous offset until the data referring to that second has been processed
+    inc_timestamps.push(ros::Time::now());
     while (ros::ok()) {
         int bytes = 0;
         while (bytes < LINE_SIZE) {
@@ -164,6 +178,8 @@ int main(int argc, char **argv) {
             }
 
             tcdrain(fd);
+
+            inc_timestamps.push(ros::Time::now());
         }
     }
 }

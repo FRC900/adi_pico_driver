@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <time.h>
 #include <sys/time.h>
+#include <string.h>
 #include <iostream>
 #include <math.h>
 #include "ros/ros.h"
@@ -31,6 +32,18 @@ stream 1
 */
 
 const char inc[] = "inc\r";
+const char *init[] = {
+    "cmd 4\r",
+    "echo 0\r",
+    "write 00 FD\r",
+    "write 02 02\r",
+    "write 00 FE\r",
+    "write 12 00\r",
+    "write 13 68\r",
+    "write 00 FF\r",
+    "stream 1\r"
+};
+
 
 unsigned long long nsecs_offset;
 
@@ -103,8 +116,17 @@ int main(int argc, char **argv) {
      * and returns up to the number of bytes requested. */
     newtio.c_cc[VMIN] = LINE_SIZE;
 
-    tcflush(fd, TCIFLUSH);
+    tcflush(fd, TCIOFLUSH);
     tcsetattr(fd, TCSANOW, &newtio);
+
+    /* Write all init commands */
+    for (const char *s : init) {
+        write(fd, s, strlen(s));
+    }
+
+    /* Write all output, clear input */
+    tcdrain(fd);
+    tcflush(fd, TCIFLUSH);
 
     ros::init(argc, argv, "imu");
     ros::NodeHandle nh("~");

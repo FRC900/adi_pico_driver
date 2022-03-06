@@ -11,7 +11,7 @@ catkin_package(INCLUDE_DIRS include CATKIN_DEPENDS roscpp sensor_msgs std_srvs)
 
 include_directories(include ${catkin_INCLUDE_DIRS} ${Boost_INCLUDE_DIRS})
 
-add_executable(adis16470_node src/main.cpp src/serial_port.cpp)
+add_executable(adis16470_node src/main.cpp)
 target_link_libraries(adis16470_node ${catkin_LIBRARIES} ${Boost_LIBRARIES})
 
 install(DIRECTORY include/${PROJECT_NAME}/

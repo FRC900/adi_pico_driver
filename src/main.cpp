@@ -1,5 +1,3 @@
-// NOTE this requires access to /dev/ttyACM0, which may require adding the user to a group with permissions (e.g. dialout)
-
 #include "ros/ros.h"
 #include "sensor_msgs/Imu.h"
 #include <fcntl.h>
@@ -19,54 +17,76 @@
 #define DEVICE "/dev/ttyACM0"
 #define _POSIX_SOURCE 1 /* POSIX compliant source */
 #define LINE_SIZE 81
+#define LINE_ITEMS 16
+#define SIGNATURE_INDEX 4
+#define CHECKSUM_INDEX 15
 
-const char inc[] = "inc\r";
-const char *init[] = {
-    "\r",
-    "cmd 4\r",
-    "echo 0\r",
-    "write 00 FD\r",
-    "write 02 02\r",
-    "write 00 FE\r",
-    "write 12 00\r",
-    "write 13 68\r",
-    "write 00 FF\r",
-    "stream 1\r"
-};
+const char init[] =
+    "\r"
+    "cmd 4\r"
+    "echo 0\r"
+    "write 00 FD\r"
+    "write 02 02\r"
+    "write 00 FE\r"
+    "write 12 00\r"
+    "write 13 68\r"
+    "write 00 FF\r"
+    "inc\r"
+    "stream 1\r";
 
 ros::Publisher pub;
-
-/* Time of incrementing PPS to (i - seconds_index) */
-std::queue<ros::Time> inc_timestamps;
-/* The earliest second PPS was incremented to */
-int seconds_index = 0;
+ros::Time reset;
+int fd;
 
 void process_data(char *buf) {
-    std::array<uint16_t, 16> vals = {0};
+    std::array<uint16_t, LINE_ITEMS> vals = {0};
     char *next_num = buf;
     for (int i = 0; i < 16; i++) {
         vals[i] = strtol(next_num, &next_num, 16);
     }
 
-    // TODO: Validate checksums
-
-    int seconds = vals[0] | (vals[1] << 16);
-    int us = vals[2] | (vals[3] << 16);
-
-    /* Remove timestamp for previous second once we recieve lines from the next second */
-    if (seconds > seconds_index) {
-        inc_timestamps.pop();
-        seconds_index++;
+    uint32_t line_signature = 0;
+    for (int i = 0; i < LINE_ITEMS; i++) {
+        line_signature += vals[i];
     }
-    ros::Time timestamp = inc_timestamps.front() + ros::Duration(0, us * 1000);
+    /* Don't add the checksum to itself */
+    line_signature -= vals[SIGNATURE_INDEX];
+
+    /* Check the Pico's checksum */
+    if ((uint16_t) line_signature != vals[SIGNATURE_INDEX]) {
+        printf("Pico signature mismatch: calculated: %d recieved: %d\n",
+               line_signature, vals[SIGNATURE_INDEX]);
+        puts(buf);
+        return;
+    }
+
+    /* Check the IMU's checksum */
+    int imu_checksum = 0;
+    /* After line signature is unused field, then start of IMU data */
+    for (int i = SIGNATURE_INDEX + 2; i < CHECKSUM_INDEX; i++) {
+        imu_checksum += vals[i] & 0xFF;
+        imu_checksum += vals[i] >> 8;
+    }
+
+    /* Check the Pico's checksum */
+    if (imu_checksum != vals[CHECKSUM_INDEX]) {
+        printf("IMU signature mismatch: calculated: %d recieved: %d\n",
+               imu_checksum, vals[CHECKSUM_INDEX]);
+        puts(buf);
+        return;
+    }
+
+    uint32_t us = vals[2] | (vals[3] << 16);
+
+    /* Divide into seconds to avoid overflow when turning us to ns */
+    uint32_t s = us / 1000000;
+    us = us % 1000000;
 
     sensor_msgs::Imu msg;
 
     // Microseconds to nanoseconds
-    msg.header.stamp = timestamp;
+    msg.header.stamp = reset + ros::Duration(s, us * 1000);
 
-    // DATA_CNTR
-    // msg.header.seq = vals[14];
     msg.header.frame_id = "imu";
 
     // Angular velocity: {X,Y,Z}_GYRO_OUT
@@ -88,13 +108,22 @@ void process_data(char *buf) {
     pub.publish(msg);
 }
 
+void clear_line() {
+    char c;
+    do {
+        read(fd, &c, 1);
+    } while (c != '\n');
+}
+
 int main(int argc, char **argv) {
-    int fd;
+    ros::init(argc, argv, "imu");
+    ros::NodeHandle nh("~");
+
     struct termios tty;
 
     fd = open(DEVICE, O_RDWR | O_NOCTTY | O_SYNC);
     if (fd < 0) {
-        ROS_ERROR("%s: %s", DEVICE, strerror(errno));
+        ROS_ERROR("Failed to open %s: %s", DEVICE, strerror(errno));
         return 1;
     }
 
@@ -118,24 +147,20 @@ int main(int argc, char **argv) {
     tcsetattr(fd, TCSANOW, &tty);
 
     /* Write all init commands */
-    for (const char *s : init) {
-        if(write(fd, s, strlen(s)) == -1) {
-            ROS_ERROR("failed to write \"%s\" during initialization: %s", s, strerror(errno));
-        }
+    if(write(fd, init, sizeof(init) - 1) == -1) {
+        ROS_ERROR("Failed to write initialization sequence: %s", strerror(errno));
+        return 1;
     }
 
-    /* Write all output, clear input */
     tcdrain(fd);
+    reset = ros::Time::now();
     tcflush(fd, TCIFLUSH);
 
-    ros::init(argc, argv, "imu");
-    ros::NodeHandle nh("~");
-    pub = nh.advertise<sensor_msgs::Imu>("data_raw", 100);
+    pub = nh.advertise<sensor_msgs::Imu>("data_raw", 10);
 
-    char buf[LINE_SIZE + 1];
+    /* Null terminator for printing */
+    char buf[LINE_SIZE+1];
     buf[LINE_SIZE] = '\0';
-    time_t seconds = 0;
-    inc_timestamps.push(ros::Time::now());
     while (ros::ok()) {
         int bytes = 0;
         while (bytes < LINE_SIZE) {
@@ -146,13 +171,7 @@ int main(int argc, char **argv) {
 
         if (buf[LINE_SIZE - 1] != '\n') {
             ROS_WARN("Line not ending with \\n, skipping");
-
-            /* Discard characters until \n */
-            char c;
-            do {
-                read(fd, &c, 1);
-            } while (c != '\n');
-
+            clear_line();
             continue;
         }
 
@@ -165,21 +184,10 @@ int main(int argc, char **argv) {
         }
         if (length == 4095) {
             ROS_ERROR("Serial port recieve buffer overflow");
+            clear_line();
+            continue;
         }
 
         process_data(buf);
-
-        time_t s = time(NULL);
-        if (s > seconds) {
-            seconds = s;
-
-            if(write(fd, inc, sizeof(inc) - 1) == -1) {
-                ROS_ERROR("failed to increment PPS: %s", strerror(errno));
-            }
-
-            tcdrain(fd);
-
-            inc_timestamps.push(ros::Time::now());
-        }
     }
 }

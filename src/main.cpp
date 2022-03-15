@@ -5,7 +5,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
-#include <queue>
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/types.h>
@@ -18,8 +17,10 @@
 #define _POSIX_SOURCE 1 /* POSIX compliant source */
 #define LINE_SIZE 81
 #define LINE_ITEMS 16
-#define SIGNATURE_INDEX 4
-#define CHECKSUM_INDEX 15
+#define PICO_CHECK 4
+#define DIAG_STAT 6
+#define IMU_CHECK 15
+#define CONSECUTIVE_ERRS 5
 
 const char init[] =
     "\r"
@@ -33,100 +34,21 @@ const char init[] =
     "write 00 FF\r"
     "inc\r"
     "stream 1\r";
+const char reset_cmd[] = "cmd 4000";
 
 ros::Publisher pub;
 ros::Time reset;
 int fd;
+int errors = 0;
 
-void process_data(char *buf) {
-    std::array<uint16_t, LINE_ITEMS> vals = {0};
-    char *next_num = buf;
-    for (int i = 0; i < 16; i++) {
-        vals[i] = strtol(next_num, &next_num, 16);
-    }
-
-    uint32_t line_signature = 0;
-    for (int i = 0; i < LINE_ITEMS; i++) {
-        line_signature += vals[i];
-    }
-    /* Don't add the checksum to itself */
-    line_signature -= vals[SIGNATURE_INDEX];
-
-    /* Check the Pico's checksum */
-    if ((uint16_t) line_signature != vals[SIGNATURE_INDEX]) {
-        printf("Pico signature mismatch: calculated: %d recieved: %d\n",
-               line_signature, vals[SIGNATURE_INDEX]);
-        puts(buf);
-        return;
-    }
-
-    /* Check the IMU's checksum */
-    int imu_checksum = 0;
-    /* After line signature is unused field, then start of IMU data */
-    for (int i = SIGNATURE_INDEX + 2; i < CHECKSUM_INDEX; i++) {
-        imu_checksum += vals[i] & 0xFF;
-        imu_checksum += vals[i] >> 8;
-    }
-
-    /* Check the Pico's checksum */
-    if (imu_checksum != vals[CHECKSUM_INDEX]) {
-        printf("IMU signature mismatch: calculated: %d recieved: %d\n",
-               imu_checksum, vals[CHECKSUM_INDEX]);
-        puts(buf);
-        return;
-    }
-
-    uint32_t us = vals[2] | (vals[3] << 16);
-
-    /* Divide into seconds to avoid overflow when turning us to ns */
-    uint32_t s = us / 1000000;
-    us = us % 1000000;
-
-    sensor_msgs::Imu msg;
-
-    // Microseconds to nanoseconds
-    msg.header.stamp = reset + ros::Duration(s, us * 1000);
-
-    msg.header.frame_id = "imu";
-
-    // Angular velocity: {X,Y,Z}_GYRO_OUT
-    msg.angular_velocity.x = static_cast<int16_t>(vals[7]) * M_PI / 180 * 0.1;
-    msg.angular_velocity.y = static_cast<int16_t>(vals[8]) * M_PI / 180 * 0.1;
-    msg.angular_velocity.z = static_cast<int16_t>(vals[9]) * M_PI / 180 * 0.1;
-
-    // Linear acceleration: {X,Y,Z}_ACCL_OUT
-    msg.linear_acceleration.x = static_cast<int16_t>(vals[10]) * 1.25 * 9.80665 / 1000.;
-    msg.linear_acceleration.y = static_cast<int16_t>(vals[11]) * 1.25 * 9.80665 / 1000.;
-    msg.linear_acceleration.z = static_cast<int16_t>(vals[12]) * 1.25 * 9.80665 / 1000.;
-
-    // Orientation (not provided)
-    msg.orientation.x = 0;
-    msg.orientation.y = 0;
-    msg.orientation.z = 0;
-    msg.orientation.w = 1;
-
-    pub.publish(msg);
-}
-
-void clear_line() {
-    char c;
-    do {
-        read(fd, &c, 1);
-    } while (c != '\n');
-}
-
-int main(int argc, char **argv) {
-    ros::init(argc, argv, "imu");
-    ros::NodeHandle nh("~");
-
-    struct termios tty;
-
+void init_tty() {
     fd = open(DEVICE, O_RDWR | O_NOCTTY | O_SYNC);
     if (fd < 0) {
         ROS_ERROR("Failed to open %s: %s", DEVICE, strerror(errno));
-        return 1;
+        exit(1);
     }
 
+    struct termios tty;
     cfsetospeed (&tty, BAUDRATE);
     cfsetispeed (&tty, BAUDRATE);
     tty.c_cflag = BAUDRATE | CS8 | CLOCAL | CREAD;
@@ -149,19 +71,101 @@ int main(int argc, char **argv) {
     /* Write all init commands */
     if(write(fd, init, sizeof(init) - 1) == -1) {
         ROS_ERROR("Failed to write initialization sequence: %s", strerror(errno));
-        return 1;
+        exit(1);
     }
 
     tcdrain(fd);
     reset = ros::Time::now();
     tcflush(fd, TCIFLUSH);
+}
+
+void invalid_line(const std::runtime_error &e) {
+    ROS_WARN_STREAM(e.what());
+    errors++;
+    if (errors >= CONSECUTIVE_ERRS) {
+        close(fd);
+        init_tty();
+    }
+}
+
+void check_buf(char *buf) {
+    if (buf[LINE_SIZE - 1] != '\n') {
+        throw std::runtime_error("Line not ending with \\n, skipping");
+    }
+
+    int length;
+    ioctl(fd, FIONREAD, &length);
+
+    /* The recieve buffer holds at most 4095 bytes */
+    if (length >= 4000) {
+        ROS_WARN("Serial port receive buffer holding %d out of 4095 bytes", length);
+    }
+    if (length == 4095) {
+        throw std::runtime_error("Serial port recieve buffer overflow");
+    }
+}
+
+std::array<uint16_t, LINE_ITEMS> parse_line(char *buf) {
+    std::array<uint16_t, LINE_ITEMS> vals = {0};
+    char *next_num = buf;
+    for (int i = 0; i < 16; i++) {
+        vals[i] = strtol(next_num, &next_num, 16);
+    }
+
+    uint32_t pico_check = 0;
+    for (int i = 0; i < LINE_ITEMS; i++) {
+        pico_check += vals[i];
+    }
+    /* Don't add the checksum to itself */
+    pico_check -= vals[PICO_CHECK];
+
+    if ((uint16_t) pico_check != vals[PICO_CHECK]) {
+        throw std::runtime_error("Pico checksum mismatch: calculated: " +
+                                 std::to_string(pico_check) +
+                                 " recieved: " +
+                                 std::to_string(vals[PICO_CHECK]) +
+                                 std::string(buf, LINE_SIZE));
+    }
+
+    int imu_check = 0;
+    /* After line signature is unused field, then start of IMU data */
+    for (int i = PICO_CHECK + 2; i < IMU_CHECK; i++) {
+        imu_check += vals[i] & 0xFF;
+        imu_check += vals[i] >> 8;
+    }
+
+    if (imu_check != vals[IMU_CHECK]) {
+        throw std::runtime_error("IMU checksum mismatch: calculated: " +
+                                 std::to_string(imu_check) +
+                                 " recieved: " +
+                                 std::to_string(vals[IMU_CHECK]) +
+                                 std::string(buf, LINE_SIZE));
+    }
+
+    if (vals[DIAG_STAT] & (1u << 1)) {
+        ROS_WARN("IMU DIAG_STAT: data path overrun, resetting");
+        if(write(fd, reset_cmd, sizeof(reset_cmd) - 1) == -1) {
+            ROS_ERROR("Failed to reset IMU after data path overrun");
+        }
+    } else if (vals[DIAG_STAT]) {
+        ROS_WARN("IMU DIAG_STAT: 0x%02x", vals[DIAG_STAT]);
+    }
+
+    return vals;
+}
+
+int main(int argc, char **argv) {
+    ros::init(argc, argv, "imu");
+    ros::NodeHandle nh("~");
 
     pub = nh.advertise<sensor_msgs::Imu>("data_raw", 10);
 
-    /* Null terminator for printing */
-    char buf[LINE_SIZE+1];
-    buf[LINE_SIZE] = '\0';
+    init_tty();
+
+    char buf[LINE_SIZE];
+    int i = 0;
     while (ros::ok()) {
+        i++;
         int bytes = 0;
         while (bytes < LINE_SIZE) {
             /* read() isn't guaranteed to read MIN bytes,
@@ -169,25 +173,59 @@ int main(int argc, char **argv) {
             bytes += read(fd, buf + bytes, LINE_SIZE - bytes);
         }
 
-        if (buf[LINE_SIZE - 1] != '\n') {
-            ROS_WARN("Line not ending with \\n, skipping");
-            clear_line();
+        try {
+            check_buf(buf);
+            errors = 0;
+        } catch (const std::runtime_error &e) {
+            invalid_line(e);
+
+            /* Skip to end of line */
+            char c;
+            do {
+                read(fd, &c, 1);
+            } while (c != '\n');
+
             continue;
         }
 
-        int length;
-        ioctl(fd, FIONREAD, &length);
-
-        /* The recieve buffer holds at most 4095 bytes */
-        if (length >= 4000) {
-            ROS_WARN("Serial port receive buffer holding %d out of 4095 bytes", length);
-        }
-        if (length == 4095) {
-            ROS_ERROR("Serial port recieve buffer overflow");
-            clear_line();
+        std::array<uint16_t, LINE_ITEMS> vals;
+        try {
+            vals = parse_line(buf);
+            errors = 0;
+        } catch(const std::runtime_error &e) {
+            invalid_line(e);
             continue;
         }
 
-        process_data(buf);
+        uint32_t us = vals[2] | (vals[3] << 16);
+
+        /* Divide into seconds to avoid overflow when turning us to ns */
+        uint32_t s = us / 1000000;
+        us = us % 1000000;
+
+        sensor_msgs::Imu msg;
+
+        // Microseconds to nanoseconds
+        msg.header.stamp = reset + ros::Duration(s, us * 1000);
+
+        msg.header.frame_id = "imu";
+
+        // Angular velocity: {X,Y,Z}_GYRO_OUT
+        msg.angular_velocity.x = static_cast<int16_t>(vals[7]) * M_PI / 180 * 0.1;
+        msg.angular_velocity.y = static_cast<int16_t>(vals[8]) * M_PI / 180 * 0.1;
+        msg.angular_velocity.z = static_cast<int16_t>(vals[9]) * M_PI / 180 * 0.1;
+
+        // Linear acceleration: {X,Y,Z}_ACCL_OUT
+        msg.linear_acceleration.x = static_cast<int16_t>(vals[10]) * 1.25 * 9.80665 / 1000.;
+        msg.linear_acceleration.y = static_cast<int16_t>(vals[11]) * 1.25 * 9.80665 / 1000.;
+        msg.linear_acceleration.z = static_cast<int16_t>(vals[12]) * 1.25 * 9.80665 / 1000.;
+
+        // Orientation (not provided)
+        msg.orientation.x = 0;
+        msg.orientation.y = 0;
+        msg.orientation.z = 0;
+        msg.orientation.w = 1;
+
+        pub.publish(msg);
     }
 }

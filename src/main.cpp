@@ -41,6 +41,9 @@ ros::Time reset;
 int fd;
 int errors = 0;
 
+std::array<uint16_t, LINE_ITEMS> cur_vals;
+char cur_line[LINE_SIZE + 1] = {0};
+
 void init_tty() {
     fd = open(DEVICE, O_RDWR | O_NOCTTY | O_SYNC);
     if (fd < 0) {
@@ -79,8 +82,7 @@ void init_tty() {
     tcflush(fd, TCIFLUSH);
 }
 
-void invalid_line(const std::runtime_error &e) {
-    ROS_WARN_STREAM(e.what());
+void error_handler() {
     errors++;
     if (errors >= CONSECUTIVE_ERRS) {
         close(fd);
@@ -88,70 +90,99 @@ void invalid_line(const std::runtime_error &e) {
     }
 }
 
-void check_buf(char *buf) {
-    if (buf[LINE_SIZE - 1] != '\n') {
-        throw std::runtime_error("Line not ending with \\n, skipping");
-    }
-
+bool read_line() {
     int length;
     ioctl(fd, FIONREAD, &length);
 
     /* The recieve buffer holds at most 4095 bytes */
+    if (length == 4095) {
+        ROS_ERROR("Serial port recieve buffer overflow");
+        return false;
+    }
     if (length >= 4000) {
         ROS_WARN("Serial port receive buffer holding %d out of 4095 bytes", length);
     }
-    if (length == 4095) {
-        throw std::runtime_error("Serial port recieve buffer overflow");
+
+    int bytes = 0;
+    while (bytes < LINE_SIZE) {
+        /* read() isn't guaranteed to read MIN bytes,
+         * keep calling it until it reads all of them */
+        bytes += read(fd, cur_line + bytes, LINE_SIZE - bytes);
     }
+
+    if (cur_line[LINE_SIZE - 1] != '\n') {
+        ROS_WARN("Line not ending with \\n");
+        return false;
+    }
+    return true;
 }
 
-std::array<uint16_t, LINE_ITEMS> parse_line(char *buf) {
-    std::array<uint16_t, LINE_ITEMS> vals = {0};
-    char *next_num = buf;
-    for (int i = 0; i < 16; i++) {
-        vals[i] = strtol(next_num, &next_num, 16);
+bool read_halfword(char *s, uint16_t &res) {
+    uint16_t value = 0;
+    char c;
+
+    for(int i = 0; i < 4; i++)
+    {
+        c = s[i];
+        if(c >= '0' && c <= '9') {
+            c = c - '0';
+        } else if (c >= 'A' && c <='F') {
+            c = c - 'A' + 10;
+        } else {
+            return false;
+        }
+        value = value * 16 + c;
+    }
+    res = value;
+    return true;
+}
+
+bool parse_line() {
+    char *next_num = cur_line;
+    for (int i = 0; i < LINE_ITEMS; i++) {
+        if (!read_halfword(next_num, cur_vals[i])) {
+            ROS_ERROR("Failed to parse line\n%s", cur_line);
+            return false;
+        }
+        next_num += 5;
     }
 
     uint32_t pico_check = 0;
     for (int i = 0; i < LINE_ITEMS; i++) {
-        pico_check += vals[i];
+        pico_check += cur_vals[i];
     }
     /* Don't add the checksum to itself */
-    pico_check -= vals[PICO_CHECK];
+    pico_check -= cur_vals[PICO_CHECK];
 
-    if ((uint16_t) pico_check != vals[PICO_CHECK]) {
-        throw std::runtime_error("Pico checksum mismatch: calculated: " +
-                                 std::to_string(pico_check) +
-                                 " recieved: " +
-                                 std::to_string(vals[PICO_CHECK]) +
-                                 std::string(buf, LINE_SIZE));
+    if ((uint16_t) pico_check != cur_vals[PICO_CHECK]) {
+        ROS_WARN("Pico checksum mismatch: calculated: %d recieved: %d\n%s",
+               pico_check, cur_vals[PICO_CHECK], cur_line);
+        return false;
     }
 
     int imu_check = 0;
     /* After line signature is unused field, then start of IMU data */
     for (int i = PICO_CHECK + 2; i < IMU_CHECK; i++) {
-        imu_check += vals[i] & 0xFF;
-        imu_check += vals[i] >> 8;
+        imu_check += cur_vals[i] & 0xFF;
+        imu_check += cur_vals[i] >> 8;
     }
 
-    if (imu_check != vals[IMU_CHECK]) {
-        throw std::runtime_error("IMU checksum mismatch: calculated: " +
-                                 std::to_string(imu_check) +
-                                 " recieved: " +
-                                 std::to_string(vals[IMU_CHECK]) +
-                                 std::string(buf, LINE_SIZE));
+    if (imu_check != cur_vals[IMU_CHECK]) {
+        ROS_WARN("IMU checksum mismatch: calculated: %d recieved: %d\n%s",
+                 imu_check, cur_vals[IMU_CHECK], cur_line);
+        return false;
     }
 
-    if (vals[DIAG_STAT] & (1u << 1)) {
+    if (cur_vals[DIAG_STAT] & (1u << 1)) {
         ROS_WARN("IMU DIAG_STAT: data path overrun, resetting");
         if(write(fd, reset_cmd, sizeof(reset_cmd) - 1) == -1) {
             ROS_ERROR("Failed to reset IMU after data path overrun");
         }
-    } else if (vals[DIAG_STAT]) {
-        ROS_WARN("IMU DIAG_STAT: 0x%02x", vals[DIAG_STAT]);
+    } else if (cur_vals[DIAG_STAT]) {
+        ROS_WARN("IMU DIAG_STAT: 0x%02x", cur_vals[DIAG_STAT]);
     }
 
-    return vals;
+    return true;
 }
 
 int main(int argc, char **argv) {
@@ -162,22 +193,11 @@ int main(int argc, char **argv) {
 
     init_tty();
 
-    char buf[LINE_SIZE];
-    int i = 0;
     while (ros::ok()) {
-        i++;
-        int bytes = 0;
-        while (bytes < LINE_SIZE) {
-            /* read() isn't guaranteed to read MIN bytes,
-             * keep calling it until it reads all of them */
-            bytes += read(fd, buf + bytes, LINE_SIZE - bytes);
-        }
-
-        try {
-            check_buf(buf);
+        if (read_line()) {
             errors = 0;
-        } catch (const std::runtime_error &e) {
-            invalid_line(e);
+        } else {
+            error_handler();
 
             /* Skip to end of line */
             char c;
@@ -188,16 +208,14 @@ int main(int argc, char **argv) {
             continue;
         }
 
-        std::array<uint16_t, LINE_ITEMS> vals;
-        try {
-            vals = parse_line(buf);
+        if (parse_line()) {
             errors = 0;
-        } catch(const std::runtime_error &e) {
-            invalid_line(e);
+        } else {
+            error_handler();
             continue;
         }
 
-        uint32_t us = vals[2] | (vals[3] << 16);
+        uint32_t us = cur_vals[2] | (cur_vals[3] << 16);
 
         /* Divide into seconds to avoid overflow when turning us to ns */
         uint32_t s = us / 1000000;
@@ -211,14 +229,14 @@ int main(int argc, char **argv) {
         msg.header.frame_id = "imu";
 
         // Angular velocity: {X,Y,Z}_GYRO_OUT
-        msg.angular_velocity.x = static_cast<int16_t>(vals[7]) * M_PI / 180 * 0.1;
-        msg.angular_velocity.y = static_cast<int16_t>(vals[8]) * M_PI / 180 * 0.1;
-        msg.angular_velocity.z = static_cast<int16_t>(vals[9]) * M_PI / 180 * 0.1;
+        msg.angular_velocity.x = static_cast<int16_t>(cur_vals[7]) * M_PI / 180 * 0.1;
+        msg.angular_velocity.y = static_cast<int16_t>(cur_vals[8]) * M_PI / 180 * 0.1;
+        msg.angular_velocity.z = static_cast<int16_t>(cur_vals[9]) * M_PI / 180 * 0.1;
 
         // Linear acceleration: {X,Y,Z}_ACCL_OUT
-        msg.linear_acceleration.x = static_cast<int16_t>(vals[10]) * 1.25 * 9.80665 / 1000.;
-        msg.linear_acceleration.y = static_cast<int16_t>(vals[11]) * 1.25 * 9.80665 / 1000.;
-        msg.linear_acceleration.z = static_cast<int16_t>(vals[12]) * 1.25 * 9.80665 / 1000.;
+        msg.linear_acceleration.x = static_cast<int16_t>(cur_vals[10]) * 1.25 * 9.80665 / 1000.;
+        msg.linear_acceleration.y = static_cast<int16_t>(cur_vals[11]) * 1.25 * 9.80665 / 1000.;
+        msg.linear_acceleration.z = static_cast<int16_t>(cur_vals[12]) * 1.25 * 9.80665 / 1000.;
 
         // Orientation (not provided)
         msg.orientation.x = 0;

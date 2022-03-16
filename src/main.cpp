@@ -23,9 +23,6 @@
 #define CONSECUTIVE_ERRS 5
 
 const char init[] =
-    "\r"
-    "cmd 4\r"
-    "echo 0\r"
     "write 00 FD\r"
     "write 02 02\r"
     "write 00 FE\r"
@@ -33,8 +30,10 @@ const char init[] =
     "write 13 68\r"
     "write 00 FF\r"
     "inc\r"
-    "stream 1\r";
-const char reset_cmd[] = "cmd 4000";
+    "stream 1\r"
+    "echo 0\r";
+const char reset_imu[] = "cmd 4000\r";
+const char reset_pico[] = "\rcmd 4\r";
 
 ros::Publisher pub;
 ros::Time reset;
@@ -71,13 +70,40 @@ void init_tty() {
     tcflush(fd, TCIOFLUSH);
     tcsetattr(fd, TCSANOW, &tty);
 
+    if(write(fd, reset_pico, sizeof(reset_pico) - 1) == -1) {
+        ROS_ERROR("Failed to reset pico during initialization: %s", strerror(errno));
+    }
+    tcdrain(fd);
+    sleep(3);
+    tcflush(fd, TCIFLUSH);
+
     /* Write all init commands */
     if(write(fd, init, sizeof(init) - 1) == -1) {
         ROS_ERROR("Failed to write initialization sequence: %s", strerror(errno));
         exit(1);
     }
-
     tcdrain(fd);
+
+    /* Read response  */
+    char c;
+    int lines = 0;
+    int i = 0;
+    while (lines < 9) {
+        if(read(fd, &c, 1) != 1) {
+            continue;
+        }
+        putc(c, stdout);
+        if (c == '\n') {
+            lines++;
+        } else {
+            if (c != init[i]) {
+                ROS_ERROR("Pico response mismatch: expected: %c recieved: %c", init[i], c);
+                exit(1);
+            }
+            i++;
+        }
+    }
+
     reset = ros::Time::now();
     tcflush(fd, TCIFLUSH);
 }
@@ -175,7 +201,7 @@ bool parse_line() {
 
     if (cur_vals[DIAG_STAT] & (1u << 1)) {
         ROS_WARN("IMU DIAG_STAT: data path overrun, resetting");
-        if(write(fd, reset_cmd, sizeof(reset_cmd) - 1) == -1) {
+        if(write(fd, reset_imu, sizeof(reset_imu) - 1) == -1) {
             ROS_ERROR("Failed to reset IMU after data path overrun");
         }
     } else if (cur_vals[DIAG_STAT]) {

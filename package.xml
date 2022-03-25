@@ -1,14 +1,11 @@
 <?xml version="1.0"?>
 <package>
   <name>adi_pico_driver</name>
-  <version>1.0.3</version>
-  <description>The adi_driver package</description>
-  <maintainer email="dev@opensource-robotics.tokyo.jp">Tokyo Opensource Robotics Kyokai (TORK) Developer Team</maintainer>
+  <version>0.0.0</version>
+  <description>The adi_pico_driver package</description>
+  <maintainer email="programmers@team900.org">FRC Team 900 Programmers</maintainer>
 
   <license>BSD</license>
-
-  <url type="website">http://wiki.ros.org/adi_driver</url>
-  <author email="ryosuke.tajima@opensource-robotics.tokyo.jp">Ryosuke Tajima</author>
 
   <buildtool_depend>catkin</buildtool_depend>
 

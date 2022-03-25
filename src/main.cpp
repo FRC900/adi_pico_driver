@@ -13,7 +13,7 @@
 #include <unistd.h>
 
 #define BAUDRATE B115200
-#define DEVICE "/dev/ttyACM0"
+#define DEVICE "/dev/PICO"
 #define _POSIX_SOURCE 1 /* POSIX compliant source */
 #define LINE_SIZE 81
 #define LINE_ITEMS 16
@@ -143,32 +143,24 @@ bool read_line() {
     return true;
 }
 
-bool read_halfword(char *s, uint16_t &res) {
-    uint16_t value = 0;
-    char c;
-
-    for(int i = 0; i < 4; i++)
-    {
-        c = s[i];
-        if(c >= '0' && c <= '9') {
-            c = c - '0';
-        } else if (c >= 'A' && c <='F') {
-            c = c - 'A' + 10;
-        } else {
-            return false;
-        }
-        value = value * 16 + c;
-    }
-    res = value;
-    return true;
-}
-
 bool parse_line() {
     char *next_num = cur_line;
     for (int i = 0; i < LINE_ITEMS; i++) {
-        if (!read_halfword(next_num, cur_vals[i])) {
-            ROS_ERROR("Failed to parse line\n%s", cur_line);
-            return false;
+        char c;
+
+        cur_vals[i] = 0;
+        for(int j = 0; j < 4; j++)
+        {
+            c = next_num[j];
+            if(c >= '0' && c <= '9') {
+                c = c - '0';
+            } else if (c >= 'A' && c <='F') {
+                c = c - 'A' + 10;
+            } else {
+                ROS_ERROR("Failed to parse line\n%s", cur_line);
+                return false;
+            }
+            cur_vals[i] = cur_vals[i] * 16 + c;
         }
         next_num += 5;
     }

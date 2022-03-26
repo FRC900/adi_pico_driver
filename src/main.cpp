@@ -32,6 +32,16 @@ const char init[] =
     "inc\r"
     "stream 1\r"
     "echo 0\r";
+const char init_res[] =
+    "write 00 FD\r\n"
+    "write 02 02\r\n"
+    "write 00 FE\r\n"
+    "write 12 00\r\n"
+    "write 13 68\r\n"
+    "write 00 FF\r\n"
+    "inc\r\n"
+    "stream 1\r\n"
+    "echo 0\r\n";
 const char reset_imu[] = "cmd 4000\r";
 const char reset_pico[] = "\rcmd 4\r";
 
@@ -83,28 +93,27 @@ void init_tty() {
         exit(1);
     }
     tcdrain(fd);
+    reset = ros::Time::now();
+    sleep(1);
 
     /* Read response  */
-    char c;
-    int lines = 0;
-    int i = 0;
-    while (lines < 9) {
-        if(read(fd, &c, 1) != 1) {
-            continue;
-        }
-        putc(c, stdout);
-        if (c == '\n') {
-            lines++;
-        } else {
-            if (c != init[i]) {
-                ROS_ERROR("Pico response mismatch: expected: %c recieved: %c", init[i], c);
-                exit(1);
-            }
-            i++;
-        }
-    }
+    size_t res_size = sizeof(init_res) - 1;
+    char recieved[sizeof(init_res)];
 
-    reset = ros::Time::now();
+    size_t bytes = 0;
+    while (bytes < res_size) {
+        /* read() isn't guaranteed to read MIN bytes,
+         * keep calling it until it reads all of them */
+        bytes += read(fd, recieved + bytes, res_size - bytes);
+    }
+    recieved[res_size] = '\0';
+
+    if (strcmp(recieved, init_res)) {
+        ROS_ERROR("Pico response mismatch: expected: \n%srecieved: \n%s", init_res, recieved);
+        exit(1);
+    }
+    ROS_INFO("\n%s", recieved);
+
     tcflush(fd, TCIFLUSH);
 }
 

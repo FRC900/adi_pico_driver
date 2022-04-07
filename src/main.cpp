@@ -155,22 +155,9 @@ bool read_line() {
 bool parse_line() {
     char *next_num = cur_line;
     for (int i = 0; i < LINE_ITEMS; i++) {
-        char c;
-
-        cur_vals[i] = 0;
-        for(int j = 0; j < 4; j++)
-        {
-            c = next_num[j];
-            if(c >= '0' && c <= '9') {
-                c = c - '0';
-            } else if (c >= 'A' && c <='F') {
-                c = c - 'A' + 10;
-            } else {
-                ROS_ERROR("Failed to parse line\n%s", cur_line);
-                return false;
-            }
-            cur_vals[i] = cur_vals[i] * 16 + c;
-        }
+        unsigned int res;
+        sscanf(next_num, "%04x", &res);
+        cur_vals[i] = res;
         next_num += 5;
     }
 

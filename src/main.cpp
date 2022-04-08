@@ -11,6 +11,7 @@
 #include <termios.h>
 #include <time.h>
 #include <unistd.h>
+#include <errno.h>
 
 #define BAUDRATE B115200
 #define DEVICE "/dev/PICO"
@@ -21,6 +22,8 @@
 #define DIAG_STAT 6
 #define IMU_CHECK 15
 #define CONSECUTIVE_ERRS 5
+
+void init_tty();
 
 const char init[] =
     "write 00 FD\r"
@@ -53,11 +56,34 @@ int errors = 0;
 std::array<uint16_t, LINE_ITEMS> cur_vals;
 char cur_line[LINE_SIZE + 1] = {0};
 
+bool read_pico(char *buf, size_t n) {
+    size_t bytes = 0;
+    while (bytes < n) {
+        /* read() isn't guaranteed to read MIN bytes,
+         * keep calling it until it reads all of them */
+        ssize_t bytes_read = read(fd, buf + bytes, n - bytes);
+        if (!bytes_read) {
+            ROS_ERROR("Timeout on reading TTY; opening again");
+            close(fd);
+            init_tty();
+            return true;
+        }
+        bytes += bytes_read;
+    }
+    return false;
+}
+
 void init_tty() {
     fd = open(DEVICE, O_RDWR | O_NOCTTY | O_SYNC);
-    if (fd < 0) {
-        ROS_ERROR("Failed to open %s: %s", DEVICE, strerror(errno));
-        exit(1);
+    while (fd < 0) {
+        if (errno == ENOENT || errno == ENXIO) {
+            ROS_ERROR("TTY not available; retrying in 5s");
+            sleep(5);
+            fd = open(DEVICE, O_RDWR | O_NOCTTY | O_SYNC);
+        } else {
+            ROS_ERROR("Failed to open %s: %s", DEVICE, strerror(errno));
+            exit(1);
+        }
     }
 
     struct termios tty;
@@ -70,8 +96,8 @@ void init_tty() {
     /* set input mode (non-canonical, no echo,...) */
     tty.c_lflag = ICANON;
 
-    /* inter-character timer unused */
-    tty.c_cc[VTIME] = 0;
+    /* timeout after 5/10 second */
+    tty.c_cc[VTIME] = 5;
 
     /* read(2) blocks until MIN bytes are available,
      * and returns up to the number of bytes requested. */
@@ -97,16 +123,9 @@ void init_tty() {
     sleep(1);
 
     /* Read response  */
-    size_t res_size = sizeof(init_res) - 1;
     char recieved[sizeof(init_res)];
-
-    size_t bytes = 0;
-    while (bytes < res_size) {
-        /* read() isn't guaranteed to read MIN bytes,
-         * keep calling it until it reads all of them */
-        bytes += read(fd, recieved + bytes, res_size - bytes);
-    }
-    recieved[res_size] = '\0';
+    read_pico(recieved, sizeof(init_res) - 1);
+    recieved[sizeof(recieved) - 1] = '\0';
 
     if (strcmp(recieved, init_res)) {
         ROS_ERROR("Pico response mismatch: expected: \n%srecieved: \n%s", init_res, recieved);
@@ -138,12 +157,7 @@ bool read_line() {
         ROS_WARN("Serial port receive buffer holding %d out of 4095 bytes", length);
     }
 
-    int bytes = 0;
-    while (bytes < LINE_SIZE) {
-        /* read() isn't guaranteed to read MIN bytes,
-         * keep calling it until it reads all of them */
-        bytes += read(fd, cur_line + bytes, LINE_SIZE - bytes);
-    }
+    read_pico(cur_line, LINE_SIZE);
 
     if (cur_line[LINE_SIZE - 1] != '\n') {
         ROS_WARN("Line not ending with \\n");

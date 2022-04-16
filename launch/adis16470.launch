@@ -10,7 +10,7 @@
   <arg name="publish_tf" default="true"/>
   <arg name="publish_debug_topics" default="false"/>
 
-  <param if="$(arg with_rviz)" name="robot_description" command="$(find xacro)/xacro --inorder '$(find adi_driver)/urdf/adis16470_breakout.urdf'" />
+  <param if="$(arg with_rviz)" name="robot_description" command="$(find xacro)/xacro --inorder '$(find adi_pico_driver)/urdf/adis16470_breakout.urdf'" />
 
   <node name="imu" pkg="adi_pico_driver" type="adis16470_node" output="screen">
     <param name="device" value="$(arg device)"/>

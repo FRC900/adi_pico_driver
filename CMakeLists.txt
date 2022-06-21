@@ -14,7 +14,7 @@ include_directories(include ${catkin_INCLUDE_DIRS} ${Boost_INCLUDE_DIRS})
 add_executable(adis16470_node src/main.cpp)
 target_link_libraries(adis16470_node ${catkin_LIBRARIES} ${Boost_LIBRARIES})
 
-install(DIRECTORY launch test urdf
+install(DIRECTORY launch urdf
   DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
   USE_SOURCE_PERMISSIONS
   )

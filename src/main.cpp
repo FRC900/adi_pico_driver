@@ -26,14 +26,22 @@
 void init_tty();
 
 const char init[] =
+    /* Reset pico configuration, putting in into a clean state */
+    "cmd 4\r"
+    /* Enable burst data capture */
     "write 00 FD\r"
     "write 02 02\r"
+    /* Configure burst read signal */
     "write 00 FE\r"
     "write 12 00\r"
     "write 13 68\r"
+    /* Move to output page */
     "write 00 FF\r"
+    /* Reset timer */
     "inc\r"
+    /* Print buffer contents */
     "stream 1\r"
+    /* Don't print further commands */
     "echo 0\r";
 const char init_res[] =
     "write 00 FD\r\n"
